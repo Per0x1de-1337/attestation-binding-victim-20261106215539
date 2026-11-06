@@ -1,0 +1,59 @@
+name: Legitimate attestation control
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  attest-control:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create synthetic control artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl rand -hex 64 > a-control.bin
+          sha256sum a-control.bin | awk '{print $1}' > a-artifact.sha256
+          printf 'Synthetic artifact SHA-256: `%s`\n' "$(cat a-artifact.sha256)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate legitimate repository attestation
+        id: attest
+        uses: actions/attest@v4
+        with:
+          subject-path: a-control.bin
+
+      - name: Preserve redacted attestation evidence
+        if: always()
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${BUNDLE_PATH:-}" && -f "$BUNDLE_PATH" ]]; then
+            cp "$BUNDLE_PATH" a-bundle.json
+            jq -r '.dsseEnvelope.payload' a-bundle.json | base64 -d > a-statement.json
+            jq -r '.verificationMaterial.certificate.rawBytes // empty' a-bundle.json | base64 -d > a-cert.der
+            if [[ -s a-cert.der ]]; then
+              openssl x509 -inform DER -in a-cert.der -noout -text > a-certificate.txt
+            fi
+            rm -f a-cert.der
+          fi
+
+      - name: Upload control evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a-attestation-evidence-${{ github.run_id }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            a-control.bin
+            a-artifact.sha256
+            a-bundle.json
+            a-statement.json
+            a-certificate.txt
